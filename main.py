@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from urllib.parse import urlparse, urlunparse
 
+import aiosqlite
+
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandObject
 from aiogram.types import (
@@ -2319,8 +2321,8 @@ async def command_leaderboard(message: Message):
 async def archived_tasks(message: Message):
     if not await is_admin(message.from_user.id):
         return
-    async with __import__('aiosqlite').connect('bot.db') as db:
-        db.row_factory = __import__('aiosqlite').Row
+    async with aiosqlite.connect('bot.db') as db:
+        db.row_factory = aiosqlite.Row
         cursor = await db.execute("""
         SELECT tasks.id, tasks.subreddit, tasks.payout_amount, tasks.total_slots,
                tasks.closed_at, COUNT(DISTINCT submissions.id) AS submissions
@@ -2345,8 +2347,8 @@ async def archived_tasks(message: Message):
 async def review_history(message: Message):
     if not await is_admin(message.from_user.id):
         return
-    async with __import__('aiosqlite').connect('bot.db') as db:
-        db.row_factory = __import__('aiosqlite').Row
+    async with aiosqlite.connect('bot.db') as db:
+        db.row_factory = aiosqlite.Row
         cursor = await db.execute("""
         SELECT submissions.id, submissions.username, submissions.status,
                submissions.reviewed_at, tasks.subreddit, tasks.payout_amount
@@ -2372,8 +2374,8 @@ async def review_history(message: Message):
 async def paid_payments_history(message: Message):
     if not await is_admin(message.from_user.id):
         return
-    async with __import__('aiosqlite').connect('bot.db') as db:
-        db.row_factory = __import__('aiosqlite').Row
+    async with aiosqlite.connect('bot.db') as db:
+        db.row_factory = aiosqlite.Row
         cursor = await db.execute("""
         SELECT payments.id, payments.username, payments.amount,
                payments.paid_at, payments.task_id
@@ -2396,7 +2398,7 @@ async def paid_payments_history(message: Message):
 async def payment_stats_handler(message: Message):
     if not await is_admin(message.from_user.id):
         return
-    async with __import__('aiosqlite').connect('bot.db') as db:
+    async with aiosqlite.connect('bot.db') as db:
         cursor = await db.execute("""
         SELECT
             COUNT(*) FILTER (WHERE status = 'pending') AS pending,
@@ -2421,8 +2423,8 @@ async def payment_stats_handler(message: Message):
 async def warned_members(message: Message):
     if not await is_admin(message.from_user.id):
         return
-    async with __import__('aiosqlite').connect('bot.db') as db:
-        db.row_factory = __import__('aiosqlite').Row
+    async with aiosqlite.connect('bot.db') as db:
+        db.row_factory = aiosqlite.Row
         cursor = await db.execute("""
         SELECT telegram_id, username, warnings
         FROM users
@@ -2443,8 +2445,8 @@ async def warned_members(message: Message):
 async def banned_members(message: Message):
     if not await is_admin(message.from_user.id):
         return
-    async with __import__('aiosqlite').connect('bot.db') as db:
-        db.row_factory = __import__('aiosqlite').Row
+    async with aiosqlite.connect('bot.db') as db:
+        db.row_factory = aiosqlite.Row
         cursor = await db.execute("""
         SELECT telegram_id, username
         FROM users
@@ -2465,8 +2467,8 @@ async def banned_members(message: Message):
 async def earnings_stats_handler(message: Message):
     if not await is_admin(message.from_user.id):
         return
-    async with __import__('aiosqlite').connect('bot.db') as db:
-        db.row_factory = __import__('aiosqlite').Row
+    async with aiosqlite.connect('bot.db') as db:
+        db.row_factory = aiosqlite.Row
         cursor = await db.execute("""
         SELECT payments.username, payments.user_id,
                SUM(CAST(REPLACE(REPLACE(amount, '₹', ''), ' ', '') AS REAL)) AS total_earned,
