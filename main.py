@@ -684,19 +684,31 @@ async def admin_settings_handler(message: Message):
     if not await is_admin(message.from_user.id):
         return
     maintenance = await get_setting("maintenance_mode", "0")
-    maint_label = "🔴 Disable Maintenance" if maintenance == "1" else "🟢 Enable Maintenance"
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💰 Payout Defaults", callback_data="admin:config:payout")],
-        [InlineKeyboardButton(text="🔄 Auto-Close Tasks", callback_data="admin:config:autoclose")],
-        [InlineKeyboardButton(text="🛡 Duplicate Protection", callback_data="admin:config:dupe_prot")],
-        [InlineKeyboardButton(text="⏰ Claim Timeout", callback_data="admin:config:timeout")],
-        [InlineKeyboardButton(text=maint_label, callback_data="admin:config:maintenance")],
-    ])
+    maint_label = "🔴 Disable Maintenance Mode" if maintenance == "1" else "🟢 Enable Maintenance Mode"
     status_text = "🔴 MAINTENANCE MODE ON" if maintenance == "1" else "🟢 System Online"
+    claim_timeout = await get_setting("claim_timeout_minutes", "30")
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=maint_label, callback_data="admin:config:maintenance")],
+        [InlineKeyboardButton(text=f"⏰ Claim Timeout: {claim_timeout} min", callback_data="admin:config:timeout")],
+    ])
     await message.answer(
-        f"⚙ ADMIN SETTINGS\n\nStatus: {status_text}\n\nModify global bot behavior:",
-        reply_markup=keyboard
+        f"⚙ ADMIN SETTINGS\n\n"
+        f"Status: {status_text}\n"
+        f"Claim Timeout: {claim_timeout} min\n"
+        f"Duplicate Protection: ✅ Always on\n\n"
+        "Tap a setting to change it:",
+        reply_markup=keyboard,
     )
+
+
+@dp.callback_query(F.data == "admin:config:timeout")
+async def config_timeout(callback: CallbackQuery):
+    if not await is_admin(callback.from_user.id):
+        await callback.answer("Admins only.", show_alert=True)
+        return
+    set_user_state(callback.from_user.id, {"flow": "set_claim_timeout"})
+    await callback.message.answer("Send new claim timeout in minutes (e.g. 30):")
+    await callback.answer()
 
 
 @dp.callback_query(F.data == "admin:config:maintenance")
@@ -833,9 +845,9 @@ async def active_tasks(message_or_callback, page=1):
     markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
     
     if isinstance(message_or_callback, CallbackQuery):
-        await message_or_callback.message.edit_text(text, reply_markup=markup)
+        await message_or_callback.message.edit_text(text, reply_markup=markup, parse_mode="Markdown")
     else:
-        await message_or_callback.answer(text, reply_markup=markup)
+        await message_or_callback.answer(text, reply_markup=markup, parse_mode="Markdown")
 
 
 @dp.callback_query(F.data.startswith("task:page:"))
@@ -1136,8 +1148,6 @@ async def pending_payments(message_or_callback, bot: Bot, page=1):
 @dp.callback_query(F.data.startswith("payment:page:"))
 async def payment_page_callback(callback: CallbackQuery, bot: Bot):
     page = int(callback.data.split(":")[2])
-    # We'll just send a new message for payments to avoid media edit complexity
-    await callback.message.delete()
     await pending_payments(callback, bot, page)
     await callback.answer()
 
@@ -1437,17 +1447,28 @@ async def broadcast_cancel(callback: CallbackQuery):
 async def my_stats(message: Message):
     log_button_click(message, BTN_MY_STATS)
     clear_user_state(message.from_user.id, "my_stats")
+    await register_user(message.from_user.id, message.from_user.username)
     stats = await get_member_stats(message.from_user.id)
+    if not stats:
+        await message.answer("Could not load stats. Please try again.")
+        return
     payments = await get_payment_history(message.from_user.id)
+    total_reviewed = stats['approved'] + stats['rejected']
+    rate_text = f"{stats['approval_rate']}%" if total_reviewed > 0 else "—"
+    earned = total_amount(payments, paid_only=True) or "₹0"
+    level_icons = {"Beginner": "🥉", "Trusted": "🥈", "Elite": "🥇"}
+    level_icon = level_icons.get(stats['level'], "🏅")
     await message.answer(
-        "👤 Member Stats\n\n"
-        f"✅ Completed Tasks: {stats['approved']}\n"
-        f"⏳ Pending Reviews: {stats['pending']}\n"
-        f"❌ Rejected Submissions: {stats['rejected']}\n"
-        f"💰 Total Earned: {total_amount(payments, paid_only=True)}\n"
-        f"⭐ Approval Rate: {stats['approval_rate']}%\n"
-        f"🏅 Level: {stats['level']}\n"
-        f"⚠ Warnings: {stats['warnings']}"
+        f"📊 YOUR STATS\n"
+        f"{'─' * 28}\n\n"
+        f"✅ Completed: {stats['approved']}\n"
+        f"⏳ Pending Review: {stats['pending']}\n"
+        f"❌ Rejected: {stats['rejected']}\n\n"
+        f"💰 Total Earned: {earned}\n"
+        f"⭐ Approval Rate: {rate_text}\n"
+        f"{level_icon} Level: {stats['level']}\n"
+        f"⚠ Warnings: {stats['warnings']}\n"
+        f"🔥 Streak: {stats['streak'] or 0} days"
     )
 
 
@@ -1614,7 +1635,10 @@ async def handle_photo(message: Message):
         saved_qr["qr_uploaded_at"] if saved_qr else None,
     )
     clear_user_state(message.from_user.id, "qr_saved")
-    await message.answer("QR saved.", reply_markup=payments_menu())
+    await message.answer(
+        "✅ QR code saved!\n\nAdmins will see your QR when processing your payment.",
+        reply_markup=payments_menu(),
+    )
 
 
 @dp.message()
@@ -1699,29 +1723,29 @@ async def handle_text(message: Message, bot: Bot):
     elif button_match == BTN_TASKS_ACTIVE: await active_tasks(message)
     elif button_match == BTN_TASKS_STATS: await task_stats(message)
     elif button_match == BTN_TASKS_MANAGE: await manage_tasks_button(message)
-    elif button_match == BTN_TASKS_ARCHIVED: await message.answer("Archived tasks feature coming soon.")
+    elif button_match == BTN_TASKS_ARCHIVED: await archived_tasks(message)
 
     # Review Submenu
     elif button_match == BTN_REVIEWS_PENDING: await review_button(message)
     elif button_match == BTN_REVIEWS_FLAGGED: await flagged_submissions(message)
-    elif button_match == BTN_REVIEWS_HISTORY: await message.answer("Review history feature coming soon.")
+    elif button_match == BTN_REVIEWS_HISTORY: await review_history(message)
 
     # Payment Submenu
     elif button_match == BTN_PAYMENTS_PENDING: await pending_payments(message, bot)
-    elif button_match == BTN_PAYMENTS_PAID: await message.answer("Paid history feature coming soon.")
-    elif button_match == BTN_PAYMENTS_STATS: await message.answer("Payment stats feature coming soon.")
+    elif button_match == BTN_PAYMENTS_PAID: await paid_payments_history(message)
+    elif button_match == BTN_PAYMENTS_STATS: await payment_stats_handler(message)
 
     # Member Submenu
     elif button_match == BTN_MEMBERS_SEARCH: await member_stats_admin(message)
-    elif button_match == BTN_MEMBERS_WARNED: await message.answer("Warned members list coming soon.")
-    elif button_match == BTN_MEMBERS_BANNED: await message.answer("Banned members list coming soon.")
-    elif button_match == BTN_MEMBERS_TRUSTED: await message.answer("Trusted members list coming soon.")
+    elif button_match == BTN_MEMBERS_WARNED: await warned_members(message)
+    elif button_match == BTN_MEMBERS_BANNED: await banned_members(message)
+    elif button_match == BTN_MEMBERS_TRUSTED: await trusted_members_handler(message)
 
     # Analytics Submenu
     elif button_match == BTN_ANALYTICS_DAILY: await command_dailystats(message)
     elif button_match == BTN_ANALYTICS_SYSTEM: await system_stats_handler(message)
     elif button_match == BTN_ANALYTICS_TOP: await command_leaderboard(message)
-    elif button_match == BTN_ANALYTICS_EARNINGS: await message.answer("Earnings stats feature coming soon.")
+    elif button_match == BTN_ANALYTICS_EARNINGS: await earnings_stats_handler(message)
 
     # User Payments
     elif button_match == BTN_SET_UPI: await set_upi(message)
@@ -1752,12 +1776,19 @@ async def continue_state_flow(message, state, bot):
         await handle_submit_link(message, text)
     elif flow == "set_upi":
         if not valid_upi_id(text):
-            await message.answer("Invalid UPI format. Example: name@okaxis")
+            await message.answer(
+                "❌ That doesn't look like a valid UPI ID.\n\n"
+                "Format: yourname@bank  (e.g. raju@okaxis, priya@upi)\n\n"
+                "Try again:"
+            )
             return
         await save_upi_id(message.from_user.id, text)
         clear_user_state(message.from_user.id, "upi_saved")
         logging.info("UPI saved: user=%s", message.from_user.id)
-        await message.answer("UPI ID saved.", reply_markup=payments_menu())
+        await message.answer(
+            f"✅ UPI ID saved!\n\n💳 {text}\n\nPayments will be sent to this address.",
+            reply_markup=payments_menu(),
+        )
     elif flow == "member_stats":
         member_id = None
         if text.startswith("@"):
@@ -1808,6 +1839,13 @@ async def continue_state_flow(message, state, bot):
             f"This will be sent to {count} member(s).",
             reply_markup=confirm_keyboard,
         )
+    elif flow == "set_claim_timeout":
+        if not text.isdigit() or int(text) <= 0 or int(text) > 1440:
+            await message.answer("Send a number between 1 and 1440 (minutes).")
+            return
+        await set_setting("claim_timeout_minutes", text)
+        clear_user_state(message.from_user.id, "timeout_set")
+        await message.answer(f"✅ Claim timeout set to {text} minutes.")
     elif flow == "reject_reason":
         submission = await reject_submission(state["submission_id"], message.from_user.id, text)
         clear_user_state(message.from_user.id, "reject_reason_saved")
@@ -1818,11 +1856,18 @@ async def continue_state_flow(message, state, bot):
         try:
             await bot.send_message(
                 submission["user_id"],
-                f"❌ Submission Rejected\n\nReason:\n{text}",
+                f"❌ Submission Not Approved\n\n"
+                f"Unfortunately your submission for Task #{submission.get('task_id', '?')} was not approved.\n\n"
+                f"Reason: {text}\n\n"
+                "If you believe this is a mistake, please contact an admin.",
             )
         except Exception:
             logging.exception("Could not notify worker about rejection")
-        await message.answer("Submission rejected.")
+        await message.answer(f"✅ Submission rejected and member notified.")
+    else:
+        logging.warning("Unknown flow in continue_state_flow: user=%s flow=%s", message.from_user.id, flow)
+        clear_user_state(message.from_user.id, "unknown_flow")
+        await show_home(message)
 
 
 def back_cancel_keyboard():
@@ -2088,9 +2133,9 @@ async def send_review_queue(message_or_callback, page=1):
     markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
     
     if isinstance(message_or_callback, CallbackQuery):
-        await message_or_callback.message.edit_text(text, reply_markup=markup, disable_web_page_preview=True)
+        await message_or_callback.message.edit_text(text, reply_markup=markup, parse_mode="Markdown", disable_web_page_preview=True)
     else:
-        await message_or_callback.answer(text, reply_markup=markup, disable_web_page_preview=True)
+        await message_or_callback.answer(text, reply_markup=markup, parse_mode="Markdown", disable_web_page_preview=True)
 
 
 @dp.callback_query(F.data.startswith("review:page:"))
@@ -2222,7 +2267,10 @@ async def trusted_members_handler(message: Message):
 async def list_members(message_or_callback, page=1):
     member_ids = await get_all_member_ids()
     if not member_ids:
-        await message_or_callback.answer("No members found.")
+        if isinstance(message_or_callback, CallbackQuery):
+            await message_or_callback.message.answer("No members found.")
+        else:
+            await message_or_callback.answer("No members found.")
         return
 
     total = len(member_ids)
@@ -2267,6 +2315,178 @@ async def command_leaderboard(message: Message):
         lines.append(f"{i}. @{row['username'] or row['telegram_id']} - {row['level']}\n"
                      f"   ✅ {row['approved_tasks']} tasks | 💰 ₹{row['total_earned'] or 0}")
     await message.answer("\n".join(lines) if rows else "No leaderboard data.", parse_mode="Markdown")
+
+async def archived_tasks(message: Message):
+    if not await is_admin(message.from_user.id):
+        return
+    async with __import__('aiosqlite').connect('bot.db') as db:
+        db.row_factory = __import__('aiosqlite').Row
+        cursor = await db.execute("""
+        SELECT tasks.id, tasks.subreddit, tasks.payout_amount, tasks.total_slots,
+               tasks.closed_at, COUNT(DISTINCT submissions.id) AS submissions
+        FROM tasks
+        LEFT JOIN submissions ON submissions.task_id = tasks.id
+        WHERE tasks.status IN ('archived', 'closed')
+        GROUP BY tasks.id
+        ORDER BY tasks.closed_at DESC
+        LIMIT 10
+        """)
+        rows = [dict(r) for r in await cursor.fetchall()]
+    if not rows:
+        await message.answer("No archived or closed tasks.")
+        return
+    lines = ["🗃 **Archived Tasks** (last 10)\n"]
+    for t in rows:
+        closed = (t['closed_at'] or '')[:10]
+        lines.append(f"• Task #{t['id']} r/{t['subreddit']} | {t['payout_amount']} | {t['submissions']} subs | {closed}")
+    await message.answer("\n".join(lines), parse_mode="Markdown")
+
+
+async def review_history(message: Message):
+    if not await is_admin(message.from_user.id):
+        return
+    async with __import__('aiosqlite').connect('bot.db') as db:
+        db.row_factory = __import__('aiosqlite').Row
+        cursor = await db.execute("""
+        SELECT submissions.id, submissions.username, submissions.status,
+               submissions.reviewed_at, tasks.subreddit, tasks.payout_amount
+        FROM submissions
+        JOIN tasks ON tasks.id = submissions.task_id
+        WHERE submissions.status IN ('approved', 'rejected')
+        ORDER BY submissions.reviewed_at DESC
+        LIMIT 15
+        """)
+        rows = [dict(r) for r in await cursor.fetchall()]
+    if not rows:
+        await message.answer("No reviewed submissions yet.")
+        return
+    icons = {"approved": "✅", "rejected": "❌"}
+    lines = ["📜 **Recent Reviews** (last 15)\n"]
+    for s in rows:
+        icon = icons.get(s['status'], "❓")
+        date = (s['reviewed_at'] or '')[:10]
+        lines.append(f"{icon} #{s['id']} @{s['username'] or '?'} r/{s['subreddit']} {s['payout_amount']} {date}")
+    await message.answer("\n".join(lines), parse_mode="Markdown")
+
+
+async def paid_payments_history(message: Message):
+    if not await is_admin(message.from_user.id):
+        return
+    async with __import__('aiosqlite').connect('bot.db') as db:
+        db.row_factory = __import__('aiosqlite').Row
+        cursor = await db.execute("""
+        SELECT payments.id, payments.username, payments.amount,
+               payments.paid_at, payments.task_id
+        FROM payments
+        WHERE payments.status = 'paid'
+        ORDER BY payments.paid_at DESC
+        LIMIT 15
+        """)
+        rows = [dict(r) for r in await cursor.fetchall()]
+    if not rows:
+        await message.answer("No paid payments yet.")
+        return
+    lines = ["✅ **Paid History** (last 15)\n"]
+    for p in rows:
+        date = (p['paid_at'] or '')[:10]
+        lines.append(f"✅ #{p['id']} @{p['username'] or '?'} {p['amount']} Task #{p['task_id']} {date}")
+    await message.answer("\n".join(lines), parse_mode="Markdown")
+
+
+async def payment_stats_handler(message: Message):
+    if not await is_admin(message.from_user.id):
+        return
+    async with __import__('aiosqlite').connect('bot.db') as db:
+        cursor = await db.execute("""
+        SELECT
+            COUNT(*) FILTER (WHERE status = 'pending') AS pending,
+            COUNT(*) FILTER (WHERE status = 'paid') AS paid,
+            COUNT(*) FILTER (WHERE status = 'failed') AS failed
+        FROM payments
+        """)
+        row = await cursor.fetchone()
+        cursor2 = await db.execute("SELECT amount FROM payments WHERE status = 'paid'")
+        paid_rows = await cursor2.fetchall()
+    total = sum(float(re.search(r'[\d.]+', r[0]).group()) for r in paid_rows if re.search(r'[\d.]+', r[0]))
+    await message.answer(
+        f"📊 **Payment Stats**\n\n"
+        f"⏳ Pending: {row[0]}\n"
+        f"✅ Paid: {row[1]}\n"
+        f"❌ Failed/Cancelled: {row[2]}\n"
+        f"💰 Total Paid Out: ₹{total:.2f}",
+        parse_mode="Markdown",
+    )
+
+
+async def warned_members(message: Message):
+    if not await is_admin(message.from_user.id):
+        return
+    async with __import__('aiosqlite').connect('bot.db') as db:
+        db.row_factory = __import__('aiosqlite').Row
+        cursor = await db.execute("""
+        SELECT telegram_id, username, warnings
+        FROM users
+        WHERE warnings > 0
+        ORDER BY warnings DESC
+        LIMIT 20
+        """)
+        rows = [dict(r) for r in await cursor.fetchall()]
+    if not rows:
+        await message.answer("No warned members.")
+        return
+    lines = ["⚠ **Warned Members**\n"]
+    for u in rows:
+        lines.append(f"⚠ {u['warnings']}x @{u['username'] or '?'} (`{u['telegram_id']}`)")
+    await message.answer("\n".join(lines), parse_mode="Markdown")
+
+
+async def banned_members(message: Message):
+    if not await is_admin(message.from_user.id):
+        return
+    async with __import__('aiosqlite').connect('bot.db') as db:
+        db.row_factory = __import__('aiosqlite').Row
+        cursor = await db.execute("""
+        SELECT telegram_id, username
+        FROM users
+        WHERE is_banned = 1
+        ORDER BY telegram_id DESC
+        LIMIT 20
+        """)
+        rows = [dict(r) for r in await cursor.fetchall()]
+    if not rows:
+        await message.answer("No restricted accounts.")
+        return
+    lines = ["🚫 **Restricted Accounts**\n"]
+    for u in rows:
+        lines.append(f"🚫 @{u['username'] or '?'} (`{u['telegram_id']}`)")
+    await message.answer("\n".join(lines), parse_mode="Markdown")
+
+
+async def earnings_stats_handler(message: Message):
+    if not await is_admin(message.from_user.id):
+        return
+    async with __import__('aiosqlite').connect('bot.db') as db:
+        db.row_factory = __import__('aiosqlite').Row
+        cursor = await db.execute("""
+        SELECT payments.username, payments.user_id,
+               SUM(CAST(REPLACE(REPLACE(amount, '₹', ''), ' ', '') AS REAL)) AS total_earned,
+               COUNT(*) AS payment_count
+        FROM payments
+        WHERE status = 'paid'
+        GROUP BY payments.user_id
+        ORDER BY total_earned DESC
+        LIMIT 10
+        """)
+        rows = [dict(r) for r in await cursor.fetchall()]
+    if not rows:
+        await message.answer("No earnings data yet.")
+        return
+    lines = ["💰 **Top Earners**\n"]
+    for i, r in enumerate(rows, 1):
+        name = f"@{r['username']}" if r['username'] else f"ID:{r['user_id']}"
+        lines.append(f"{i}. {name} — ₹{r['total_earned'] or 0:.2f} ({r['payment_count']} payments)")
+    await message.answer("\n".join(lines), parse_mode="Markdown")
+
 
 @dp.error()
 async def handle_error(event: ErrorEvent):
