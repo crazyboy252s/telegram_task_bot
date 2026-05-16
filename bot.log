@@ -1,0 +1,3 @@
+INFO:root:Bot started
+INFO:aiogram.dispatcher:Start polling
+INFO:aiogram.dispatcher:Run polling for bot @taskworkerviron_bot id=8418320983 - 'TaskWorkerBot'

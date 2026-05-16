@@ -1,0 +1,70 @@
+import asyncio
+import logging
+import os
+import re
+from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
+from urllib.parse import urlparse, urlunparse
+
+from aiogram import Bot, Dispatcher, F
+from aiogram.filters import Command, CommandObject
+from aiogram.types import (
+    CallbackQuery,
+    ErrorEvent,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    Message,
+    ReplyKeyboardMarkup,
+)
+from dotenv import load_dotenv
+
+from database import (
+    add_comments_to_task,
+    approve_submission,
+    archive_task,
+    auto_cleanup_claims,
+    ban_user,
+    cancel_payment,
+    claim_comment,
+    close_task,
+    create_db,
+    create_task,
+    flag_submission,
+    get_active_claim,
+    get_active_tasks,
+    get_all_member_ids,
+    get_daily_stats,
+    get_flagged_submissions,
+    get_leaderboard,
+    get_member_stats,
+    get_payment_history,
+    get_pending_payments,
+    get_pending_submissions,
+    get_submission_history,
+    get_system_stats,
+    get_task_stats,
+    get_total_stats,
+    get_user,
+    get_user_by_username,
+    log_audit_action,
+    mark_payment_paid,
+    post_exists,
+    reddit_comment_id_exists,
+    register_user,
+    reject_submission,
+    save_qr_file_id,
+    save_submission,
+    save_upi_id,
+    shadowban_user,
+    submission_exists_for_comment,
+    submission_link_exists,
+    unban_user,
+    update_reputation,
+    update_task_status,
+)
+
+
+load_dotenv()
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
