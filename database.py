@@ -37,6 +37,8 @@ async def create_db():
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute("PRAGMA journal_mode=WAL")
         await db.execute("PRAGMA synchronous=NORMAL")
+
+        # 1. CREATE ALL TABLES (BASE SCHEMA)
         await db.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -50,7 +52,16 @@ async def create_db():
             last_submit_at TIMESTAMP,
             total_claims INTEGER DEFAULT 0,
             total_submissions INTEGER DEFAULT 0,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            notes TEXT,
+            warnings INTEGER DEFAULT 0,
+            role TEXT DEFAULT 'member',
+            reputation_score INTEGER DEFAULT 100,
+            is_shadowbanned INTEGER DEFAULT 0,
+            badges TEXT,
+            streak_count INTEGER DEFAULT 0,
+            last_active_at TIMESTAMP,
+            max_reddit_accounts INTEGER DEFAULT 1
         )
         """)
 
@@ -69,7 +80,14 @@ async def create_db():
             status TEXT DEFAULT 'active',
             created_by INTEGER NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            closed_at TIMESTAMP
+            closed_at TIMESTAMP,
+            minimum_level TEXT DEFAULT 'Beginner',
+            admin_notes TEXT,
+            priority TEXT DEFAULT 'normal',
+            is_boosted INTEGER DEFAULT 0,
+            tags TEXT,
+            min_reputation INTEGER DEFAULT 0,
+            archived INTEGER DEFAULT 0
         )
         """)
 
@@ -81,6 +99,13 @@ async def create_db():
             assigned INTEGER DEFAULT 0,
             assigned_to INTEGER,
             assigned_at TIMESTAMP,
+            times_assigned INTEGER DEFAULT 0,
+            times_approved INTEGER DEFAULT 0,
+            times_rejected INTEGER DEFAULT 0,
+            times_removed INTEGER DEFAULT 0,
+            last_used_at TIMESTAMP,
+            status TEXT DEFAULT 'available',
+            reused_count INTEGER DEFAULT 0,
             UNIQUE(task_id, text),
             FOREIGN KEY (task_id) REFERENCES tasks(id)
         )
@@ -102,6 +127,19 @@ async def create_db():
             submitted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             reviewed_at TIMESTAMP,
             reviewed_by INTEGER,
+            is_disputed INTEGER DEFAULT 0,
+            admin_note TEXT,
+            archived INTEGER DEFAULT 0,
+            comment_alive INTEGER,
+            comment_last_checked_at TIMESTAMP,
+            comment_check_count INTEGER DEFAULT 0,
+            live_status TEXT DEFAULT 'unchecked',
+            last_live_check TIMESTAMP,
+            live_duration_hours REAL DEFAULT 0,
+            is_payable INTEGER DEFAULT 0,
+            first_seen_live_at TIMESTAMP,
+            reddit_account_id INTEGER,
+            reddit_author TEXT,
             FOREIGN KEY (task_id) REFERENCES tasks(id),
             FOREIGN KEY (comment_id) REFERENCES comments(id)
         )
@@ -119,6 +157,7 @@ async def create_db():
             status TEXT DEFAULT 'pending',
             paid_at TIMESTAMP,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            archived INTEGER DEFAULT 0,
             FOREIGN KEY (submission_id) REFERENCES submissions(id)
         )
         """)
@@ -152,47 +191,6 @@ async def create_db():
         )
         """)
 
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_submissions_user_id ON submissions(user_id)")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_submissions_task_id ON submissions(task_id)")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_submissions_status ON submissions(status)")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_submissions_submitted_at ON submissions(submitted_at)")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_tasks_archived ON tasks(archived)")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_comments_task_id ON comments(task_id)")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_comments_assigned_to ON comments(assigned_to)")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_comments_assigned ON comments(assigned)")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_payments_user_id ON payments(user_id)")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status)")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_users_telegram_id ON users(telegram_id)")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)")
-        
-        # New indexes for operational performance
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_tasks_priority ON tasks(priority)")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_submissions_comment_id ON submissions(comment_id)")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_submissions_reddit_cid ON submissions(reddit_comment_id)")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_payments_submission_id ON payments(submission_id)")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_submissions_comment_alive ON submissions(comment_alive)")
-
-        # Duplicate submission protection at the DB level.
-        # One submission per (user, comment slot) — prevents double-submit even under race.
-        await db.execute("""
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_submissions_user_comment
-        ON submissions(user_id, comment_id)
-        WHERE comment_id IS NOT NULL
-        """)
-        # One submission per normalized Reddit link globally (cross-user fraud guard).
-        await db.execute("""
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_submissions_normalized_link
-        ON submissions(normalized_reddit_link)
-        WHERE normalized_reddit_link IS NOT NULL
-        """)
-        # One submission per Reddit comment ID globally.
-        await db.execute("""
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_submissions_reddit_comment_id
-        ON submissions(reddit_comment_id)
-        WHERE reddit_comment_id IS NOT NULL
-        """)
-
         await db.execute("""
         CREATE TABLE IF NOT EXISTS comment_assignment_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -207,12 +205,6 @@ async def create_db():
         )
         """)
 
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_c_assignment_user ON comment_assignment_history(user_id)")
-        await db.execute("CREATE INDEX IF NOT EXISTS idx_c_assignment_comment ON comment_assignment_history(comment_id)")
-
-        # Reddit accounts owned by a Telegram user. ONE Telegram user may own MANY
-        # Reddit accounts, but each Reddit username can belong to only ONE Telegram
-        # user globally (enforced by the unique index below).
         await db.execute("""
         CREATE TABLE IF NOT EXISTS reddit_accounts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -229,6 +221,57 @@ async def create_db():
             FOREIGN KEY (telegram_user_id) REFERENCES users(telegram_id)
         )
         """)
+
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+        """)
+
+        # 2. RUN MIGRATIONS (ADD MISSING COLUMNS TO OLD DATABASES)
+        await _upgrade_columns(db)
+
+        # 3. CREATE ALL INDEXES (SAFE NOW THAT COLUMNS EXIST)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_submissions_user_id ON submissions(user_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_submissions_task_id ON submissions(task_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_submissions_status ON submissions(status)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_submissions_submitted_at ON submissions(submitted_at)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_tasks_archived ON tasks(archived)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_comments_task_id ON comments(task_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_comments_assigned_to ON comments(assigned_to)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_comments_assigned ON comments(assigned)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_payments_user_id ON payments(user_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_users_telegram_id ON users(telegram_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)")
+        
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_tasks_priority ON tasks(priority)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_submissions_comment_id ON submissions(comment_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_submissions_reddit_cid ON submissions(reddit_comment_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_payments_submission_id ON payments(submission_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_submissions_comment_alive ON submissions(comment_alive)")
+
+        await db.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_submissions_user_comment
+        ON submissions(user_id, comment_id)
+        WHERE comment_id IS NOT NULL
+        """)
+        await db.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_submissions_normalized_link
+        ON submissions(normalized_reddit_link)
+        WHERE normalized_reddit_link IS NOT NULL
+        """)
+        await db.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_submissions_reddit_comment_id
+        ON submissions(reddit_comment_id)
+        WHERE reddit_comment_id IS NOT NULL
+        """)
+
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_c_assignment_user ON comment_assignment_history(user_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_c_assignment_comment ON comment_assignment_history(comment_id)")
+
         await db.execute("""
         CREATE UNIQUE INDEX IF NOT EXISTS idx_reddit_accounts_username_unique
         ON reddit_accounts(reddit_username COLLATE NOCASE)
@@ -236,13 +279,13 @@ async def create_db():
         await db.execute("CREATE INDEX IF NOT EXISTS idx_reddit_accounts_user ON reddit_accounts(telegram_user_id)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_reddit_accounts_status ON reddit_accounts(status)")
 
-        await _upgrade_columns(db)
-        # Indexes on columns that _upgrade_columns just added
         await db.execute("CREATE INDEX IF NOT EXISTS idx_submissions_live_status ON submissions(live_status)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_submissions_is_payable ON submissions(is_payable)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_submissions_last_live_check ON submissions(last_live_check)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_submissions_reddit_account ON submissions(reddit_account_id)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_submissions_reddit_author ON submissions(reddit_author)")
+
+        # 4. DATA MIGRATIONS
         await _migrate_comment_statuses(db)
         await _backfill_live_status(db)
         await db.commit()
@@ -315,6 +358,14 @@ async def _upgrade_columns(db):
         "payments": [
             ("payment_method", "TEXT DEFAULT 'UPI'"),
             ("archived", "INTEGER DEFAULT 0"),
+        ],
+        "reddit_accounts": [
+            ("approved_at", "TIMESTAMP"),
+            ("approved_by", "INTEGER"),
+            ("rejected_reason", "TEXT"),
+            ("last_used_at", "TIMESTAMP"),
+            ("notes", "TEXT"),
+            ("warnings", "INTEGER DEFAULT 0"),
         ],
     }
 
